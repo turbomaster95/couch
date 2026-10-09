@@ -1,0 +1,180 @@
+@import url("https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.1.1/400.css");
+@import url("https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.1.1/700.css");
+
+:root {
+    --background: #000;
+    --foreground: #d0d0d0;
+    --dim: #666;
+    --green: #55ff55;
+    --cyan: #55ffff;
+    --yellow: #ffff55;
+    --red: #ff5555;
+    --border: #222;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    min-height: 100%;
+    background: var(--background);
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+a {
+    color: var(--cyan);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+.terminal {
+    width: min(1200px, calc(100% - 40px));
+    margin: 0 auto;
+    padding: 28px 0 80px;
+}
+
+header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 14px;
+    margin-bottom: 28px;
+}
+
+.prompt {
+    color: var(--green);
+    font-weight: 700;
+    font-size: 18px;
+}
+
+.cursor {
+    animation: blink 1s steps(2, jump-none) infinite;
+}
+
+nav {
+    margin-top: 5px;
+}
+
+.dim {
+    color: var(--dim);
+}
+
+.command {
+    color: var(--green);
+    margin-bottom: 12px;
+}
+
+.jobs {
+    width: 100%;
+}
+
+.job {
+    display: grid;
+    grid-template-columns: 70px minmax(200px, 1fr) 100px 100px 80px;
+    gap: 14px;
+    padding: 5px 0;
+    border-bottom: 1px solid #0b0b0b;
+}
+
+.job:hover {
+    background: #080808;
+}
+
+.status-success {
+    color: var(--green);
+}
+
+.status-failed {
+    color: var(--red);
+}
+
+.status-running {
+    color: var(--yellow);
+}
+
+.status-queued {
+    color: var(--cyan);
+}
+
+.meta {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 4px 18px;
+    margin-bottom: 30px;
+}
+
+.meta-key {
+    color: var(--dim);
+}
+
+.log {
+    white-space: pre-wrap;
+    overflow-x: auto;
+    background: #030303;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 15px;
+    min-height: 100px;
+}
+
+.section {
+    margin-top: 30px;
+}
+
+.section-title {
+    color: var(--green);
+    margin-bottom: 10px;
+}
+
+.artifact {
+    padding: 3px 0;
+}
+
+.error {
+    color: var(--red);
+}
+
+.ok {
+    color: var(--green);
+}
+
+@keyframes blink {
+    0%, 45% {
+        opacity: 1;
+    }
+
+    46%, 100% {
+        opacity: 0;
+    }
+}
+
+@media(max-width: 800px) {
+    .terminal {
+        width: calc(100% - 24px);
+        padding-top: 16px;
+    }
+
+    .job {
+        display: block;
+        padding: 8px 0;
+    }
+
+    .job > * {
+        margin-right: 10px;
+    }
+
+    .meta {
+        grid-template-columns: 100px 1fr;
+    }
+}
