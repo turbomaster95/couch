@@ -590,36 +590,89 @@ static int checkout_repository(const couch_config_t *cfg, const couch_job_t *job
     return 0;
 }
 
+
 static int upload_artifact(const couch_config_t *cfg, int job_id, const char *repo_dir, const char *path) {
     char pattern[PATH_MAX];
-    if(path[0] == '/') snprintf(pattern, sizeof(pattern), "%s", path);
-    else if(snprintf(pattern, sizeof(pattern), "%s/%s", repo_dir, path) >= (int)sizeof(pattern)) return -1;
+    int length = path[0] == '/' ? snprintf(pattern, sizeof(pattern), "%s", path) : snprintf(pattern, sizeof(pattern), "%s/%s", repo_dir, path);
+
+    if(length < 0 || (size_t)length >= sizeof(pattern)) {
+        char message[512];
+        snprintf(message, sizeof(message), "couch11: artifact path is too long: %s\n", path);
+        log_text(cfg, job_id, message);
+        return -1;
+    }
 
     glob_t matches;
     memset(&matches, 0, sizeof(matches));
     int rc = glob(pattern, GLOB_TILDE, NULL, &matches);
-    if(rc == GLOB_NOMATCH) { globfree(&matches); return 0; }
-    if(rc != 0) { globfree(&matches); return -1; }
+
+    if(rc == GLOB_NOMATCH) {
+        char message[512];
+        snprintf(message, sizeof(message), "couch11: artifact path matched no files: %s\n", path);
+        log_text(cfg, job_id, message);
+        globfree(&matches);
+        return 0;
+    }
+
+    if(rc != 0) {
+        char message[512];
+        snprintf(message, sizeof(message), "couch11: glob failed for artifact '%s' (error %d)\n", path, rc);
+        log_text(cfg, job_id, message);
+        globfree(&matches);
+        return -1;
+    }
 
     int failed = 0;
+    int uploaded = 0;
+    char *buf = malloc(COUCH_ARTIFACT_CHUNK);
+
+    if(!buf) {
+        log_text(cfg, job_id, "couch11: cannot allocate artifact upload buffer\n");
+        globfree(&matches);
+        return -1;
+    }
+
     for(size_t i = 0; i < matches.gl_pathc; i++) {
+        const char *file_path = matches.gl_pathv[i];
         struct stat st;
-        if(stat(matches.gl_pathv[i], &st) != 0 || !S_ISREG(st.st_mode)) continue;
 
-        FILE *file = fopen(matches.gl_pathv[i], "rb");
-        if(!file) { failed = 1; continue; }
+        if(stat(file_path, &st) != 0) {
+            char message[PATH_MAX + 256];
+            snprintf(message, sizeof(message), "couch11: cannot stat artifact '%s': %s\n", file_path, strerror(errno));
+            log_text(cfg, job_id, message);
+            failed = 1;
+            continue;
+        }
 
-        const char *name = matches.gl_pathv[i];
+        if(!S_ISREG(st.st_mode)) continue;
+
+        FILE *file = fopen(file_path, "rb");
+
+        if(!file) {
+            char message[PATH_MAX + 256];
+            snprintf(message, sizeof(message), "couch11: cannot open artifact '%s': %s\n", file_path, strerror(errno));
+            log_text(cfg, job_id, message);
+            failed = 1;
+            continue;
+        }
+
+        const char *name = file_path;
+
         if(!strncmp(name, repo_dir, strlen(repo_dir)) && (name[strlen(repo_dir)] == '/' || name[strlen(repo_dir)] == '\0')) {
             name += strlen(repo_dir);
             while(*name == '/') name++;
         }
 
         int artifact_id = -1;
-        if(couch11_artifact_begin(cfg, job_id, name, &artifact_id) != 0) { fclose(file); failed = 1; continue; }
 
-        char *buf = malloc(COUCH_ARTIFACT_CHUNK);
-        if(!buf) { fclose(file); failed = 1; continue; }
+        if(couch11_artifact_begin(cfg, job_id, name, &artifact_id) != 0) {
+            char message[PATH_MAX + 256];
+            snprintf(message, sizeof(message), "couch11: artifact registration failed for '%s' (begin request failed)\n", name);
+            log_text(cfg, job_id, message);
+            fclose(file);
+            failed = 1;
+            continue;
+        }
 
         int sequence = 0;
         size_t total = 0;
@@ -627,23 +680,63 @@ static int upload_artifact(const couch_config_t *cfg, int job_id, const char *re
 
         for(;;) {
             size_t n = fread(buf, 1, COUCH_ARTIFACT_CHUNK, file);
+
             if(n) {
-                if(couch11_artifact_chunk(cfg, artifact_id, sequence++, buf, n) != 0) { file_failed = 1; break; }
+                if(couch11_artifact_chunk(cfg, artifact_id, sequence, buf, n) != 0) {
+                    char message[PATH_MAX + 256];
+                    snprintf(message, sizeof(message), "couch11: artifact chunk upload failed for '%s' (artifact %d, chunk %d, %zu bytes)\n", name, artifact_id, sequence, n);
+                    log_text(cfg, job_id, message);
+                    file_failed = 1;
+                    break;
+                }
+
+                sequence++;
                 total += n;
             }
+
             if(n < COUCH_ARTIFACT_CHUNK) {
-                if(ferror(file)) file_failed = 1;
+                if(ferror(file)) {
+                    char message[PATH_MAX + 256];
+                    snprintf(message, sizeof(message), "couch11: read failed for artifact '%s': %s\n", name, strerror(errno));
+                    log_text(cfg, job_id, message);
+                    file_failed = 1;
+                }
                 break;
             }
         }
 
-        fclose(file);
-        free(buf);
-        if(!file_failed && couch11_artifact_finish(cfg, artifact_id, total) != 0) file_failed = 1;
+        if(fclose(file) != 0 && !file_failed) {
+            char message[PATH_MAX + 256];
+            snprintf(message, sizeof(message), "couch11: closing artifact '%s' failed: %s\n", name, strerror(errno));
+            log_text(cfg, job_id, message);
+            file_failed = 1;
+        }
+
+        if(!file_failed && couch11_artifact_finish(cfg, artifact_id, total) != 0) {
+            char message[PATH_MAX + 256];
+            snprintf(message, sizeof(message), "couch11: artifact finalization failed for '%s' (artifact %d, %zu bytes)\n", name, artifact_id, total);
+            log_text(cfg, job_id, message);
+            file_failed = 1;
+        }
+
         if(file_failed) failed = 1;
+        else {
+            char message[PATH_MAX + 256];
+            snprintf(message, sizeof(message), "couch11: uploaded artifact '%s' (%zu bytes)\n", name, total);
+            log_text(cfg, job_id, message);
+            uploaded++;
+        }
     }
 
+    free(buf);
     globfree(&matches);
+
+    if(!failed && !uploaded) {
+        char message[512];
+        snprintf(message, sizeof(message), "couch11: artifact pattern '%s' matched no regular files\n", path);
+        log_text(cfg, job_id, message);
+    }
+
     return failed ? -1 : 0;
 }
 

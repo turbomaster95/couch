@@ -438,14 +438,21 @@ int couch_db_create_artifact(int job_id, const char *name) {
 
     sqlite3_stmt *st = NULL;
     int id = -1;
+    int rc = sqlite3_prepare_v2(db, "INSERT INTO artifacts(job_id,name,created_at) VALUES(?,?,?)", -1, &st, NULL);
 
-    if(sqlite3_prepare_v2(db, "INSERT INTO artifacts(job_id,name,created_at) VALUES(?,?,?)", -1, &st, NULL) == SQLITE_OK) {
+    if(rc == SQLITE_OK) {
         sqlite3_bind_int(st, 1, job_id);
         sqlite3_bind_text(st, 2, name, -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(st, 3, (sqlite3_int64)time(NULL));
 
-        if(sqlite3_step(st) == SQLITE_DONE) id = (int)sqlite3_last_insert_rowid(db);
+        rc = sqlite3_step(st);
+
+        if(rc == SQLITE_DONE) {
+            id = (int)sqlite3_last_insert_rowid(db);
+        }
     }
+
+    if(id < 0) fprintf(stderr, "couch: cannot create artifact for job %d ('%s'): %s\n", job_id, name ? name : "", sqlite3_errmsg(db));
 
     sqlite3_finalize(st);
     pthread_mutex_unlock(&lock);
