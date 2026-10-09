@@ -19,7 +19,6 @@ typedef struct {
     int port;
     char database[512];
     char workdir[512];
-    char webdir[512];
     int poll_ms;
     int max_jobs;
     char couch_url[1024];

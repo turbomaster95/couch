@@ -1,4 +1,5 @@
-#include "couch.h"
+#include <couch.h>
+#include <embed.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -146,29 +147,33 @@ static const char *mime_type(const char *path) {
 }
 
 static int serve_web(int fd, const char *path) {
-    char file[COUCH_MAX_PATH];
     char relative[COUCH_MAX_PATH];
 
-    snprintf(relative, sizeof(relative), "%s", path);
+    if(snprintf(relative, sizeof(relative), "%s", path) >= (int)sizeof(relative)) {
+        couch_http_send_text(fd, 404, "not found\n");
+        return -1;
+    }
 
     char *query = strchr(relative, '?');
+
     if(query) *query = '\0';
 
     if(!strcmp(relative, "/")) snprintf(relative, sizeof(relative), "/index.html");
 
     if(strstr(relative, "..")) {
         couch_http_send_text(fd, 404, "not found\n");
-        return 0;
+        return -1;
     }
 
-    if(snprintf(file, sizeof(file), "%s%s", cfg.webdir, relative) >= (int)sizeof(file)) {
-        couch_http_send_text(fd, 404, "not found\n");
-        return 0;
+    for(size_t i = 0; i < couch_web_asset_count; i++) {
+        if(!strcmp(relative, couch_web_assets[i].path)) {
+            couch_http_send(fd, 200, couch_web_assets[i].content_type, couch_web_assets[i].data, couch_web_assets[i].size);
+            return 0;
+        }
     }
 
-    if(couch_http_send_file(fd, 200, mime_type(file), file) != 0) couch_http_send_text(fd, 404, "not found\n");
-
-    return 0;
+    couch_http_send_text(fd, 404, "not found\n");
+    return -1;
 }
 
 static void *client_thread(void *arg) {
@@ -442,7 +447,6 @@ int main(int argc, char **argv) {
     }
 
     printf("couch: listening on %s:%d\n", cfg.host, cfg.port);
-    printf("couch: web root %s\n", cfg.webdir);
 
     for(;;) {
         int fd = accept(server, NULL, NULL);
