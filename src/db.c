@@ -6,6 +6,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <stddef.h>
+#include <ctype.h>
 
 static sqlite3 *db;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -78,8 +79,29 @@ void couch_db_close(void) {
     db = NULL;
 }
 
+static int couch_db_ensure_job_labels(void) {
+    sqlite3_stmt *st = NULL;
+    int found = 0;
+
+    if(sqlite3_prepare_v2(db, "PRAGMA table_info(jobs)", -1, &st, NULL) != SQLITE_OK) return -1;
+
+    while(sqlite3_step(st) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(st, 1);
+        if(name && !strcmp(name, "required_labels")) {
+            found = 1;
+            break;
+        }
+    }
+
+    sqlite3_finalize(st);
+
+    if(found) return 0;
+
+    return exec_sql("ALTER TABLE jobs ADD COLUMN required_labels TEXT NOT NULL DEFAULT ''") == SQLITE_OK ? 0 : -1;
+}
+
 int couch_db_init(void) {
-    return exec_sql(
+    if(exec_sql(
         "PRAGMA journal_mode=WAL;"
         "PRAGMA foreign_keys=ON;"
         "CREATE TABLE IF NOT EXISTS jobs("
@@ -124,22 +146,25 @@ int couch_db_init(void) {
         "FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE,"
         "UNIQUE(artifact_id,sequence)"
         ");"
-    );
+    ) != SQLITE_OK) return -1;
+
+    return couch_db_ensure_job_labels();
 }
 
-int couch_db_create_job(const char *repository, const char *ref, const char *commit, const char *command) {
+int couch_db_create_job_with_labels(const char *repository, const char *ref, const char *commit, const char *command, const char *required_labels) {
     pthread_mutex_lock(&lock);
 
     sqlite3_stmt *st = NULL;
     int id = -1;
 
-    if(sqlite3_prepare_v2(db, "INSERT INTO jobs(repository,ref,commit_hash,command,status,created_at) VALUES(?,?,?,?,?,?)", -1, &st, NULL) == SQLITE_OK) {
+    if(sqlite3_prepare_v2(db, "INSERT INTO jobs(repository,ref,commit_hash,command,required_labels,status,created_at) VALUES(?,?,?,?,?,?,?)", -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, repository, -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(st, 2, ref, -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(st, 3, commit, -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(st, 4, command, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(st, 5, "queued", -1, SQLITE_STATIC);
-        sqlite3_bind_int64(st, 6, (sqlite3_int64)time(NULL));
+        sqlite3_bind_text(st, 5, required_labels ? required_labels : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 6, "queued", -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 7, (sqlite3_int64)time(NULL));
 
         if(sqlite3_step(st) == SQLITE_DONE) id = (int)sqlite3_last_insert_rowid(db);
     }
@@ -150,49 +175,124 @@ int couch_db_create_job(const char *repository, const char *ref, const char *com
     return id;
 }
 
+int couch_db_create_job(const char *repository, const char *ref, const char *commit, const char *command) {
+    return couch_db_create_job_with_labels(repository, ref, commit, command, "");
+}
+
+static int label_list_contains(const char *list, const char *wanted, size_t wanted_len) {
+    const char *p = list ? list : "";
+
+    while(*p) {
+        const char *start = p;
+
+        while(*p && *p != ',') p++;
+
+        const char *end = p;
+
+        while(start < end && isspace((unsigned char)*start)) start++;
+        while(end > start && isspace((unsigned char)end[-1])) end--;
+
+        if((size_t)(end - start) == wanted_len && !strncmp(start, wanted, wanted_len)) return 1;
+
+        if(*p == ',') p++;
+    }
+
+    return 0;
+}
+
+static int requirements_match(const char *required, const char *available) {
+    const char *p = required ? required : "";
+
+    while(*p) {
+        const char *start = p;
+
+        while(*p && *p != ',') p++;
+
+        const char *end = p;
+
+        while(start < end && isspace((unsigned char)*start)) start++;
+        while(end > start && isspace((unsigned char)end[-1])) end--;
+
+        if(end > start && !label_list_contains(available, start, (size_t)(end - start))) return 0;
+
+        if(*p == ',') p++;
+    }
+
+    return 1;
+}
+
 int couch_db_claim_job(const char *runner, couch_job_t *job) {
     pthread_mutex_lock(&lock);
 
     sqlite3_stmt *st = NULL;
     int ok = 0;
+    char runner_labels[512] = "";
 
     if(sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
         pthread_mutex_unlock(&lock);
         return 0;
     }
 
-    if(sqlite3_prepare_v2(db, "SELECT id,repository,ref,commit_hash,command FROM jobs WHERE status='queued' ORDER BY id LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
-        if(sqlite3_step(st) == SQLITE_ROW) {
-            job->id = sqlite3_column_int(st, 0);
-            snprintf(job->repository, sizeof(job->repository), "%s", (const char *)sqlite3_column_text(st, 1));
-            snprintf(job->ref, sizeof(job->ref), "%s", (const char *)sqlite3_column_text(st, 2));
-            snprintf(job->commit, sizeof(job->commit), "%s", (const char *)sqlite3_column_text(st, 3));
-            snprintf(job->command, sizeof(job->command), "%s", (const char *)sqlite3_column_text(st, 4));
-            ok = 1;
-        }
+    if(sqlite3_prepare_v2(db, "SELECT labels FROM runners WHERE name=?", -1, &st, NULL) != SQLITE_OK) goto rollback;
+
+    sqlite3_bind_text(st, 1, runner, -1, SQLITE_TRANSIENT);
+
+    if(sqlite3_step(st) != SQLITE_ROW) goto rollback;
+
+    snprintf(runner_labels, sizeof(runner_labels), "%s", (const char *)sqlite3_column_text(st, 0) ? (const char *)sqlite3_column_text(st, 0) : "");
+
+    sqlite3_finalize(st);
+    st = NULL;
+
+    if(sqlite3_prepare_v2(db, "SELECT id,repository,ref,commit_hash,command,required_labels FROM jobs WHERE status='queued' ORDER BY id", -1, &st, NULL) != SQLITE_OK) goto rollback;
+
+    while(sqlite3_step(st) == SQLITE_ROW) {
+        const char *required = (const char *)sqlite3_column_text(st, 5);
+
+        if(!requirements_match(required, runner_labels)) continue;
+
+        job->id = sqlite3_column_int(st, 0);
+        snprintf(job->repository, sizeof(job->repository), "%s", (const char *)sqlite3_column_text(st, 1));
+        snprintf(job->ref, sizeof(job->ref), "%s", (const char *)sqlite3_column_text(st, 2));
+        snprintf(job->commit, sizeof(job->commit), "%s", (const char *)sqlite3_column_text(st, 3));
+        snprintf(job->command, sizeof(job->command), "%s", (const char *)sqlite3_column_text(st, 4));
+
+        ok = 1;
+        break;
     }
 
     sqlite3_finalize(st);
     st = NULL;
 
-    if(ok) {
-        if(sqlite3_prepare_v2(db, "UPDATE jobs SET status='running',runner=?,started_at=? WHERE id=?", -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, runner, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(st, 2, (sqlite3_int64)time(NULL));
-            sqlite3_bind_int(st, 3, job->id);
-            ok = sqlite3_step(st) == SQLITE_DONE;
-        } else {
-            ok = 0;
-        }
+    if(!ok) goto rollback;
+
+    if(sqlite3_prepare_v2(db, "UPDATE jobs SET status='running',runner=?,started_at=? WHERE id=? AND status='queued'", -1, &st, NULL) != SQLITE_OK) {
+        ok = 0;
+        goto rollback;
     }
 
-    sqlite3_finalize(st);
+    sqlite3_bind_text(st, 1, runner, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 2, (sqlite3_int64)time(NULL));
+    sqlite3_bind_int(st, 3, job->id);
 
-    sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+    ok = sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db) == 1;
+
+    sqlite3_finalize(st);
+    st = NULL;
+
+    if(ok) sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    else sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
 
     pthread_mutex_unlock(&lock);
 
     return ok;
+
+rollback:
+    sqlite3_finalize(st);
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    pthread_mutex_unlock(&lock);
+
+    return 0;
 }
 
 int couch_db_append_log(int id, const char *data, size_t len) {

@@ -205,11 +205,14 @@ static void *client_thread(void *arg) {
         char ref[COUCH_MAX_REF];
         char commit[128];
         char command[COUCH_MAX_COMMAND];
+	char required_labels[512] = "";
 
         if(!json_string(req.body, "repository", repo, sizeof(repo)) || !json_string(req.body, "ref", ref, sizeof(ref)) || !json_string(req.body, "commit", commit, sizeof(commit)) || !json_string(req.body, "command", command, sizeof(command))) {
             couch_http_send_json(fd, 400, "{\"error\":\"repository, ref, commit and command are required\"}");
         } else {
-            int id = couch_db_create_job(repo, ref, commit, command);
+            json_string(req.body, "required_labels", required_labels, sizeof(required_labels));
+
+            int id = couch_db_create_job_with_labels(repo, ref, commit, command, required_labels);
             char out[256];
 
             snprintf(out, sizeof(out), "{\"id\":%d,\"status\":\"queued\"}", id);

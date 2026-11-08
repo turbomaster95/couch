@@ -62,6 +62,7 @@ int couch_db_open(const char *path);
 void couch_db_close(void);
 int couch_db_init(void);
 int couch_db_create_job(const char *repository, const char *ref, const char *commit, const char *command);
+int couch_db_create_job_with_labels(const char *repository, const char *ref, const char *commit, const char *command, const char *required_labels);
 int couch_db_claim_job(const char *runner, couch_job_t *job);
 int couch_db_append_log(int id, const char *data, size_t len);
 int couch_db_complete_job(int id, int exit_code, int signal_no);
