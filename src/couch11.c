@@ -17,6 +17,7 @@
 #include <time.h>
 #include <limits.h>
 #include <glob.h>
+#include <sys/utsname.h>
 
 extern char **environ;
 
@@ -753,8 +754,29 @@ static int stage_needs_success(const couch_build_t *build, const couch_stage_t *
     return 1;
 }
 
+static const char *runner_architecture(void) {
+    static char machine[128];
+    static int initialized;
+
+    if(!initialized) {
+        struct utsname system;
+        if(uname(&system) == 0) snprintf(machine, sizeof(machine), "%s", system.machine);
+        else snprintf(machine, sizeof(machine), "unknown");
+        initialized = 1;
+    }
+
+    return machine;
+}
+
 static int runner_has_label(const char *label) {
-    return !strcmp(label, "linux") || !strcmp(label, "x86_64");
+    const char *arch = runner_architecture();
+
+    if(!strcmp(label, "linux")) return 1;
+    if(!strcmp(arch, "aarch64") && (!strcmp(label, "aarch64") || !strcmp(label, "arm64"))) return 1;
+    if(!strcmp(arch, "x86_64") && (!strcmp(label, "x86_64") || !strcmp(label, "amd64"))) return 1;
+    if(!strcmp(arch, "armv7l") && (!strcmp(label, "armv7l") || !strcmp(label, "armhf"))) return 1;
+
+    return !strcmp(label, arch);
 }
 
 static int stage_labels_match(const couch_stage_t *stage) {

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/utsname.h>
 
 typedef struct {
     char *data;
@@ -157,8 +158,16 @@ static int post_json(const couch_config_t *cfg, const char *path, const char *bo
 
 int couch11_register(const couch_config_t *cfg) {
     char body[1024];
+    struct utsname system;
+    const char *architecture = uname(&system) == 0 ? system.machine : "unknown";
+    char labels[256];
 
-    snprintf(body, sizeof(body), "{\"name\":\"%s\",\"labels\":\"linux,x86_64\"}", cfg->runner_name);
+    if(!strcmp(architecture, "aarch64")) snprintf(labels, sizeof(labels), "linux,aarch64,arm64");
+    else if(!strcmp(architecture, "x86_64")) snprintf(labels, sizeof(labels), "linux,x86_64,amd64");
+    else if(!strcmp(architecture, "armv7l")) snprintf(labels, sizeof(labels), "linux,armv7l,armhf");
+    else snprintf(labels, sizeof(labels), "linux,%s", architecture);
+
+    snprintf(body, sizeof(body), "{\"name\":\"%s\",\"labels\":\"%s\"}", cfg->runner_name, labels);
 
     response_t r;
 
